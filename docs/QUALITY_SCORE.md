@@ -1,20 +1,10 @@
-# 质量评分
+# Quality score
 
-用这份文档按产品区域和架构层次记录当前质量水位，方便持续知道最薄弱的地方在哪。
-
-## 建议的评分标准
-
-- `A`：覆盖完整、行为稳定、文档清楚、运行风险低。
-- `B`：整体可接受，但还有明确短板。
-- `C`：能用，但需要针对性补强。
-- `D`：脆弱、缺少规范，或很多行为尚未定义。
-
-## 初始模板
-
-| 区域 | 评分 | 原因 | 下一步 |
+| Area | Grade | Evidence | Next step |
 | --- | --- | --- | --- |
-| 产品面 | D | 还没有真实产品定义。 | 先明确第一个用户路径和验收标准。 |
-| 架构文档 | C | 有基础骨架，但还没替换成项目真实信息。 | 补齐 `docs/ARCHITECTURE.md`。 |
-| 测试 | D | 还没有接入项目自己的测试。 | 先补一条最小 smoke path。 |
-| 可观测性 | D | 还没有日志、指标、链路的约定。 | 明确本地和后续流水线怎么访问观测数据。 |
-| 安全 | C | 默认约束已经有了，但具体实现还没落地。 | 根据项目接入真实认证、密钥和依赖治理。 |
+| Core handoff | B | Secure preflight, serial transfer, 10s live disconnect wait, rollback watcher. | Add automated state-machine tests around failure branches. |
+| Edge trigger | B | Display UUID, dwell configuration, hysteresis and duplicate guard. | Add an injectable pointer/screen source for deterministic tests. |
+| Network | B | LAN fallback plus verified AWDL-scoped transport. | Exercise sleep/wake and network changes on both supported architectures. |
+| Security | B | Sandboxed app, encrypted authenticated channel, Keychain PSK, rate limiting. | Rotate protocol versions only with a documented migration path. |
+| CI/CD | B | Unsigned CI and signed/notarized tag release are defined. | Confirm the first hosted signed release and preserve evidence. |
+| Documentation | A | Setup, architecture, reliability, security and release paths are explicit. | Keep behavior and docs changed together. |

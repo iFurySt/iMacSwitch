@@ -1,11 +1,24 @@
-PROJECT ?=
-SLUG ?=
+CONFIGURATION ?= Debug
+DERIVED_DATA ?= $(CURDIR)/.build/DerivedData
+APP_PATH ?= $(DERIVED_DATA)/Build/Products/$(CONFIGURATION)/iMacSwitch.app
+OUTPUT_DIR ?= $(CURDIR)/dist
 
-.PHONY: init new-history new-plan
+.PHONY: build check ci package clean new-history new-plan
 
-init:
-	@if [ -z "$(PROJECT)" ]; then echo "用法: make init PROJECT=项目名"; exit 1; fi
-	./scripts/init-project.sh "$(PROJECT)"
+build:
+	CONFIGURATION="$(CONFIGURATION)" DERIVED_DATA="$(DERIVED_DATA)" ./scripts/build.sh
+
+check:
+	./scripts/check-project.sh
+
+ci: check
+	CONFIGURATION=Release DERIVED_DATA="$(DERIVED_DATA)" CODE_SIGNING_ALLOWED=NO ./scripts/build.sh
+
+package:
+	./scripts/package.sh "$(APP_PATH)" "$(OUTPUT_DIR)"
+
+clean:
+	xcodebuild -project iMacSwitch.xcodeproj -scheme iMacSwitch clean
 
 new-history:
 	@if [ -z "$(SLUG)" ]; then echo "用法: make new-history SLUG=变更名"; exit 1; fi

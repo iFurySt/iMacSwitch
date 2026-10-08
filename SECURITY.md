@@ -4,12 +4,13 @@
 
 如果发现疑似安全漏洞，不要直接提公开 issue。
 
-请通过你们组织内部约定的私有安全通道反馈，并尽量附上：
+请使用 GitHub Security Advisories 的私密报告入口反馈，并尽量附上：
 
 - 影响范围和潜在风险。
 - 复现步骤或 PoC。
 - 已知的缓解方式或临时绕过方案。
 
-## 适用范围
+## 敏感信息
 
-这个仓库本身只是一个基础模板。基于它创建的新项目，应该把这里替换成自己真实的安全联系人和响应流程。
+不要在 issue、日志或复现项目中提交配对码、Keychain 内容、Apple
+Developer 证书、notarization API key 或 GitHub secrets。

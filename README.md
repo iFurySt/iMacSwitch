@@ -1,36 +1,83 @@
 # iMacSwitch
 
-English version: [`iMacSwitch`](https://github.com/iFurySt/iMacSwitch)
+iMacSwitch is a focused macOS menu-bar app that moves a Bluetooth keyboard,
+mouse, or trackpad between two nearby Macs when the pointer rests at a chosen
+display edge.
 
-## 简介
+It is designed for the awkward but common setup where the two Macs cannot join
+the same LAN. Discovery and commands use Apple's peer-to-peer AWDL interface;
+Wi-Fi must be enabled, but the Macs may be connected to unrelated networks.
 
-一个面向 Agent 协作开发的基础仓库模板，可以用来启动任何你想做的产品或服务。关于如何品尝，可以参考这篇文章：[日常Harness](https://www.ifuryst.com/blog/2026/daily-harness/)
+## What it does
 
-## 快速开始
+- Watches one chosen edge of one chosen display, with a configurable
+  `0.5–10 second` dwell time.
+- Releases only the peripherals selected for that edge switch.
+- Performs one secure peer preflight, then hands peripherals over sequentially.
+- Waits for the real Bluetooth disconnect before asking the other Mac to pair.
+- Requires the pointer to leave the edge before another switch can fire.
+- Keeps manual per-device and all-device switching as a recovery path.
+- Checks [this repository's Releases](https://github.com/iFurySt/iMacSwitch/releases)
+  once a day and only notifies; it never installs an update automatically.
 
-可以在这个仓库右上角直接使用 GitHub 的模板流程：
+## Install
 
-1. 选择 **Use this template**。
-2. 选择 [**Create a new repository**](https://github.com/new?template_name=iMacSwitch&template_owner=iFurySt)。
+Download the latest signed and notarized `.dmg` or `.app.zip` from
+[Releases](https://github.com/iFurySt/iMacSwitch/releases).
 
-也可以在新仓库或已有仓库里用 [`harness-cli`](https://github.com/iFurySt/harness-cli) 初始化。先通过 npm 安装：
+On both Macs:
+
+1. Pair each Bluetooth peripheral in macOS System Settings. Each peripheral
+   must be paired with both Macs once.
+2. Launch iMacSwitch and grant Bluetooth and Local Network access.
+3. Open **Settings → Peripheral** and add the devices to manage.
+4. Open **Settings → Device** and register the other Mac.
+5. Open **Settings → Pairing** and enter the same generated code on both Macs.
+6. Open **Settings → Edge Switch**, choose a display, edge, hold duration, and
+   the peripherals that should move.
+
+For two-way switching, configure the corresponding physical outer edge on each
+Mac. An edge shared by two displays on the same Mac normally cannot be used for
+dwell switching because the pointer immediately crosses onto the other display.
+
+## Build locally
+
+Requirements: macOS 11.5+, Xcode 16 or newer.
 
 ```sh
-npm install -g @ifuryst/harness-cli
+make ci
 ```
 
-然后运行：
+The app has no third-party runtime dependencies. Local CI builds without a
+signing identity. Release tags are built, Developer ID signed, notarized, and
+published by GitHub Actions; see [`docs/CICD.md`](docs/CICD.md).
 
-```sh
-harness-cli init --language zh
+## Architecture
+
+```text
+pointer dwell
+    │
+    ▼
+EdgeSwitchManager
+    │ selected connected peripherals
+    ▼
+BluetoothPeripheralStore ── release / observe / rollback
+    │
+    ▼
+SecureChannel over Bonjour + AWDL ── CONNECT_ONE ──► peer Mac
 ```
 
-`harness-cli` 需要 Node.js 18+，并且本机 `PATH` 中需要有 Go。
+Peer commands are authenticated and encrypted with a key derived from the
+12-character pairing code. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+and [`docs/SECURITY.md`](docs/SECURITY.md).
 
-## 许可证
+## Acknowledgements
+
+iMacSwitch carries forward Bluetooth handoff ideas from
+[HoshimuraYuto/blue-switch](https://github.com/HoshimuraYuto/blue-switch) and
+subsequent reliability work, while keeping an independent product identity,
+protocol namespace, keychain namespace, and release history.
+
+## License
 
 [MIT](LICENSE)
-
-## 备注
-
-这套方法主要来自我们自己的持续实践和整理，同时也吸收了 OpenAI 在 [harness engineering 文章](https://openai.com/index/harness-engineering/) 中的一部分思路，最后汇总成了这个模板。

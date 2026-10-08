@@ -1,29 +1,40 @@
-# CI/CD 说明
+# CI/CD
 
-这个模板当前不再内置 GitHub Actions CI/CD 骨架。
+## Workflows
 
-## 当前状态
+- `.github/workflows/ci.yml`: builds the app without signing on pull requests,
+  pushes to `main`, and manual runs. It uploads an unsigned `.app.zip` and
+  `.dmg` for smoke testing.
+- `.github/workflows/release.yml`: runs for a `vX.Y.Z` tag. It imports the
+  Developer ID certificate into an ephemeral keychain, builds the app, signs
+  and notarizes both distributable forms, staples the notarization ticket, and
+  publishes a GitHub Release.
 
-- `.github/workflows/` 下没有默认 workflow。
-- 仓库不再提供 `make ci`、`scripts/ci.sh` 或 `scripts/release-package.sh`。
-- 具体项目落地后，再按真实技术栈补回测试、构建、扫描、发布和部署流水线。
+All reusable GitHub Actions are pinned to immutable commit SHAs.
 
-## 设计原则
+## Required repository secrets
 
-CI/CD 应该服务真实项目，而不是在模板阶段保留一套无人维护的占位流程。
+| Secret | Purpose |
+| --- | --- |
+| `APPLE_TEAM_ID` | Apple Developer team owning the App ID and certificate. |
+| `MACOS_CERTIFICATE_BASE64` | Base64-encoded Developer ID Application `.p12`. |
+| `MACOS_CERTIFICATE_PASSWORD` | Password used when exporting that `.p12`. |
+| `APPLE_API_KEY_ID` | App Store Connect API key ID used by `notarytool`. |
+| `APPLE_API_ISSUER_ID` | App Store Connect issuer ID. |
+| `APPLE_API_PRIVATE_KEY_BASE64` | Base64-encoded `.p8` private key. |
 
-当新项目的技术栈确定后，优先补一条最小但真实的验证链路，再逐步加入构建产物、供应链扫描、release 和部署。新增 GitHub Actions 时，仍应固定到 commit SHA，避免使用浮动 tag。
+Secrets never belong in the repository, build artifacts, logs, or release
+notes. The CI keychain and decoded credential files are deleted by the hosted
+runner after the job.
 
-## 推荐接入顺序
+## Release procedure
 
-1. 先定义项目自己的本地验证命令。
-2. 添加最小 PR gate，运行真实测试、lint 或 smoke check。
-3. 有可交付产物后，再增加打包、SBOM 和 provenance。
-4. 技术栈和环境稳定后，再补具体的部署 job。
-5. 把所有流水线入口和制品说明同步写回本文件。
+1. Ensure `make ci` succeeds on `main`.
+2. Create and push a semantic version tag, for example `v1.0.0`.
+3. The release workflow sets the app version from the tag and the build number
+   from `github.run_number`.
+4. Verify the workflow's codesign, notarization, stapling, and Gatekeeper
+   checks before sharing the generated Release URL.
 
-## 后续补回时注意
-
-- 不要恢复只有占位意义的 workflow。
-- 不要让 `Makefile` 暴露不存在或没人维护的命令。
-- 如果引入 release 自动化，同步更新 `docs/SUPPLY_CHAIN_SECURITY.md` 和 `docs/releases/README.md`。
+The in-app updater reads GitHub's `releases/latest` endpoint, so draft and
+prerelease entries do not notify normal users.

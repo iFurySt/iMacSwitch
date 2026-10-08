@@ -1,5 +1,5 @@
 name: 缺陷反馈
-description: 反馈模板仓库或默认流程中的问题。
+description: 反馈 iMacSwitch 的切换、设置或发布问题。
 title: "[Bug] "
 labels:
   - bug

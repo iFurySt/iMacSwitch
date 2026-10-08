@@ -1,10 +1,16 @@
-# 产品判断原则
+# Product principles
 
-把那些能帮助 Agent 做出更好产品取舍的长期原则沉淀在这里。
+iMacSwitch has one job: make a physical keyboard and pointing device feel as
+if they naturally cross between two nearby Macs.
 
-建议覆盖的内容：
-
-- 核心用户是谁。
-- 产品真正有价值的点是什么。
-- 当前阶段更看重哪些质量维度：速度、可信度、灵活性、成本、体验等。
-- 在早期交付和成熟运营两个阶段，判断标准分别是什么。
+- Automatic edge switching is the primary path; manual controls are a recovery
+  path, not the product center.
+- Never release a peripheral until the destination Mac has passed an
+  authenticated reachability check.
+- Prefer a slightly slower reliable handoff over parallel operations that can
+  strand input devices.
+- The two Macs must not depend on the same LAN or a public relay.
+- Configuration should answer four questions only: which display, which edge,
+  how long to dwell, and which peripherals to move.
+- Avoid permissions that are not required. Pointer polling must remain usable
+  without Accessibility access.

@@ -1,0 +1,661 @@
+import Cocoa
+import Combine
+import CoreBluetooth
+import SwiftUI
+
+/// Application delegate handling lifecycle and UI setup
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+  // MARK: - Dependencies
+
+  private let networkStore = NetworkDeviceStore.shared
+  private let bluetoothStore = BluetoothPeripheralStore.shared
+  private let edgeSwitchManager = EdgeSwitchManager.shared
+
+  // MARK: - UI Components
+
+  private var statusItem: NSStatusItem!
+  /// The AppKit view hosted by the dropdown menu's single item. Kept so it can
+  /// be re-measured each time the menu opens.
+  private var dropdownContentView: DropdownContentView?
+  private var bluetoothStateObserver: AnyCancellable?
+  private var pairingObserver: AnyCancellable?
+  private var windowCloseObserver: NSObjectProtocol?
+  private var lastBluetoothState: CBManagerState = .unknown
+  /// Cached Settings window controller. We host `SettingsView` in a manual
+  /// `NSWindow` rather than going through SwiftUI's `Settings` scene because
+  /// the scene's `showSettingsWindow:` action silently fails to produce a
+  /// visible window in this app (LSUIElement + `.accessory`).
+  private var settingsWindowController: NSWindowController?
+  /// Set true by `quitFromStatusBar(_:)` immediately before invoking
+  /// `terminate(_:)`. `applicationShouldTerminate(_:)` checks this to
+  /// distinguish "user picked Quit from our menu-bar menu" (real exit)
+  /// from "user pressed Cmd+Q with Settings focused or chose Quit from
+  /// the Dock" (just close the window, keep running).
+  private var quitFromStatusBarMenu = false
+  /// Token for the `.iMacSwitchReceivedPing` observer registered in
+  /// `setupPingFlashObserver`.
+  private var pingObserver: NSObjectProtocol?
+  /// Resets the status-bar icon back to its real state after a Ping flash.
+  private var pingFlashTimer: DispatchSourceTimer?
+  /// Observers for inbound full-set peripheral-handoff posts from
+  /// `IncomingConnection`.
+  private var transferReceiveObserver: NSObjectProtocol?
+  private var transferReleaseObserver: NSObjectProtocol?
+  /// Same, for single-peripheral switches — posted both by the local
+  /// per-peripheral senders and by the incoming `.connectOne` /
+  /// `.unregisterOne` handlers.
+  private var transferIncomingOneObserver: NSObjectProtocol?
+  private var transferOutgoingOneObserver: NSObjectProtocol?
+  /// Direction the status-bar icon should currently advertise. `idle` falls
+  /// through to the normal/needs-attention logic in `refreshStatusBarIcon`.
+  private enum TransferState {
+    case idle
+    case sending  // peripherals are leaving this Mac
+    case receiving  // peripherals are arriving at this Mac
+  }
+  private var transferState: TransferState = .idle
+  /// Auto-clears the transfer state on the receiver side (the receiver
+  /// only knows "I just got CONNECT_ALL"; it doesn't have a clean "all
+  /// peripherals settled" signal, so we revert after a fixed window).
+  private var transferAutoEndTimer: DispatchSourceTimer?
+
+  // MARK: - Lifecycle Methods
+
+  func applicationDidFinishLaunching(_ notification: Notification) {
+    setupNotifications()
+    setupBluetooth()
+    setupStatusBar()
+    setupActivationPolicyTracking()
+    setupPingFlashObserver()
+    setupTransferObservers()
+    edgeSwitchManager.start()
+    // Best-effort, silent, throttled to once per 24h. Drives the "Update
+    // Available" affordances in the right-click menu and Settings → Other.
+    UpdateChecker.shared.checkIfNeeded()
+  }
+
+  /// Fires when the user clicks the Dock icon. If a window is already
+  /// visible AppKit will bring it forward (return true). If not, the Dock
+  /// icon only exists because Settings was open recently — reopen it,
+  /// since that's the only useful action there is for this menu-bar app.
+  func applicationShouldHandleReopen(
+    _ sender: NSApplication, hasVisibleWindows flag: Bool
+  ) -> Bool {
+    if !flag {
+      openSettingsWindow(sender)
+      return false
+    }
+    return true
+  }
+
+  /// Decide whether a `terminate(_:)` request should actually exit.
+  ///
+  /// - Status-bar menu → Quit: real exit (the flag is set in `quitFromStatusBar`).
+  /// - System-initiated (logout / shutdown / restart): real exit.
+  /// - Anything else (Cmd+Q while Settings focused, right-click Dock → Quit,
+  ///   etc.): cancel the terminate, just close Settings and drop the Dock
+  ///   icon. This is the "iMacSwitch lives in the menu bar; the Dock entry
+  ///   is only there while Settings is open" mental model the user wants.
+  func applicationShouldTerminate(
+    _ sender: NSApplication
+  ) -> NSApplication.TerminateReply {
+    if quitFromStatusBarMenu { return .terminateNow }
+    if Self.isSystemInitiatedQuit() { return .terminateNow }
+    // Close any visible normal-level windows (the Settings window is the
+    // only one this app ever has). The willClose observer in
+    // `setupActivationPolicyTracking` will demote the activation policy
+    // back to `.accessory` shortly after; setting it here too just makes
+    // the Dock-icon disappearance feel immediate.
+    for window in NSApp.windows where window.isVisible && window.level == .normal {
+      window.close()
+    }
+    NSApp.setActivationPolicy(.accessory)
+    return .terminateCancel
+  }
+
+  /// True when the current AppleEvent reason is logout / shutdown / restart.
+  /// Without this check we'd block the system from quitting us during
+  /// shutdown, which can hang the logout flow.
+  private static func isSystemInitiatedQuit() -> Bool {
+    guard let event = NSAppleEventManager.shared().currentAppleEvent,
+      let reason = event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))?
+        .enumCodeValue
+    else { return false }
+    return reason == kAELogOut
+      || reason == kAEReallyLogOut
+      || reason == kAEShowRestartDialog
+      || reason == kAEShowShutdownDialog
+      || reason == kAERestart
+      || reason == kAEShutDown
+  }
+
+  /// Status-bar menu's Quit handler. Sets the "real quit" flag so
+  /// `applicationShouldTerminate` lets us exit.
+  @objc func quitFromStatusBar(_ sender: Any?) {
+    quitFromStatusBarMenu = true
+    NSApp.terminate(sender)
+  }
+
+  deinit {
+    if let token = windowCloseObserver {
+      NotificationCenter.default.removeObserver(token)
+    }
+    if let token = pingObserver {
+      NotificationCenter.default.removeObserver(token)
+    }
+    if let token = transferReceiveObserver {
+      NotificationCenter.default.removeObserver(token)
+    }
+    if let token = transferReleaseObserver {
+      NotificationCenter.default.removeObserver(token)
+    }
+    if let token = transferIncomingOneObserver {
+      NotificationCenter.default.removeObserver(token)
+    }
+    if let token = transferOutgoingOneObserver {
+      NotificationCenter.default.removeObserver(token)
+    }
+  }
+
+  // MARK: - Setup Methods
+
+  private func setupNotifications() {
+    NotificationManager.requestAuthorizationIfNeeded()
+  }
+
+  private func setupBluetooth() {
+    bluetoothStateObserver = BluetoothManager.shared.$state
+      .receive(on: DispatchQueue.main)
+      .sink { [weak self] state in
+        self?.handleBluetoothStateChange(state)
+        self?.refreshStatusBarIcon()
+      }
+    pairingObserver = PairingStore.shared.$isPaired
+      .receive(on: DispatchQueue.main)
+      .sink { [weak self] _ in
+        self?.refreshStatusBarIcon()
+      }
+    BluetoothManager.shared.setup()
+  }
+
+  private func handleBluetoothStateChange(_ state: CBManagerState) {
+    defer { lastBluetoothState = state }
+    // Only notify on transitions into a problematic state, not on every
+    // delegate fire (which includes the initial .unknown → .poweredOn).
+    guard state != lastBluetoothState else { return }
+    switch state {
+    case .poweredOff:
+      NotificationManager.showNotification(
+        title: "Bluetooth Off",
+        body: "iMacSwitch can't switch peripherals while Bluetooth is off."
+      )
+    case .unauthorized:
+      NotificationManager.showNotification(
+        title: "Bluetooth Permission Needed",
+        body: "Grant Bluetooth access in System Settings to use iMacSwitch."
+      )
+    case .unsupported:
+      NotificationManager.showNotification(
+        title: "Bluetooth Unsupported",
+        body: "This Mac does not support the Bluetooth features iMacSwitch needs."
+      )
+    case .poweredOn, .resetting, .unknown:
+      break
+    @unknown default:
+      break
+    }
+  }
+
+  private func setupStatusBar() {
+    NSApp.setActivationPolicy(.accessory)
+
+    statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    // A tracked status-item NSMenu (not a popover): it keeps the menu bar
+    // revealed over full-screen Spaces and never activates the app. Its single
+    // item hosts an AppKit `DropdownContentView` whose controls consume the
+    // mouse-up, so clicks don't dismiss it — the dropdown stays open while a
+    // peripheral pairs. (SwiftUI controls don't track inside a menu.)
+    statusItem.menu = makeDropdownMenu()
+    refreshStatusBarIcon()
+  }
+
+  /// Build the status-item dropdown: an `NSMenu` whose single item hosts the
+  /// AppKit `DropdownContentView`. The view drives switch actions directly;
+  /// Settings / Quit route back through the delegate.
+  private func makeDropdownMenu() -> NSMenu {
+    let menu = NSMenu()
+    menu.delegate = self
+    let item = NSMenuItem()
+    let content = DropdownContentView(
+      onSwitchMac: { [weak self] device in self?.performSwitch(with: device) },
+      onOpenSettings: { [weak self] in self?.openSettingsWindow(nil) },
+      onQuit: { [weak self] in self?.quitFromStatusBar(nil) })
+    content.updateFrameToFit()
+    item.view = content
+    menu.addItem(item)
+    dropdownContentView = content
+    return menu
+  }
+
+  /// Refresh reachability + re-measure the hosted view just before the dropdown
+  /// opens. Probe results land asynchronously and re-render the open menu.
+  func menuWillOpen(_ menu: NSMenu) {
+    networkStore.refreshReachability()
+    // Re-read paired devices so a peripheral renamed in System Settings (and
+    // its icon) refreshes in the dropdown without needing to open Settings.
+    BluetoothPeripheralStore.shared.fetchConnectedPeripherals()
+    dropdownContentView?.updateFrameToFit()
+  }
+
+  /// Updates the menu-bar icon based on transfer state (highest priority),
+  /// then Pairing + Bluetooth state. Transfer state shows arrow icons so
+  /// the user can tell at a glance that peripherals are moving, and in
+  /// which direction. When the app cannot function (unpaired, Bluetooth
+  /// off, etc.) we show a triangle exclamation mark instead.
+  private func refreshStatusBarIcon() {
+    guard let button = statusItem?.button else { return }
+
+    switch transferState {
+    case .sending:
+      let img = NSImage(
+        systemSymbolName: "arrow.up.right.circle.fill",
+        accessibilityDescription: "Sending peripherals to the other Mac")
+      img?.isTemplate = true
+      button.image = img
+      button.toolTip = "Sending peripherals to the other Mac…"
+      button.setAccessibilityLabel(button.toolTip ?? "")
+      return
+    case .receiving:
+      let img = NSImage(
+        systemSymbolName: "arrow.down.left.circle.fill",
+        accessibilityDescription: "Receiving peripherals from the other Mac")
+      img?.isTemplate = true
+      button.image = img
+      button.toolTip = "Receiving peripherals from the other Mac…"
+      button.setAccessibilityLabel(button.toolTip ?? "")
+      return
+    case .idle:
+      break
+    }
+
+    let needsAttention =
+      !PairingStore.shared.isPaired
+      || (BluetoothManager.shared.state != .poweredOn
+        && BluetoothManager.shared.state != .unknown)
+
+    if needsAttention {
+      let image = NSImage(
+        systemSymbolName: "exclamationmark.triangle.fill",
+        accessibilityDescription: "iMacSwitch needs attention")
+      image?.isTemplate = true
+      button.image = image
+      button.toolTip = statusBarTooltip()
+    } else if let normal = NSImage(named: "StatusBarIcon") {
+      normal.size = NSSize(width: 24, height: 24)
+      normal.isTemplate = true
+      button.image = normal
+      button.toolTip = "iMacSwitch"
+    }
+    button.setAccessibilityLabel(statusBarTooltip())
+  }
+
+  /// Set the transfer-direction icon for the duration of a transfer.
+  /// Sender uses this directly and clears it via `endTransfer()` when the
+  /// secure-channel exchange completes (success or failure-with-rollback).
+  private func beginTransfer(_ state: TransferState) {
+    transferAutoEndTimer?.cancel()
+    transferAutoEndTimer = nil
+    transferState = state
+    refreshStatusBarIcon()
+  }
+
+  /// Same as `beginTransfer` but auto-reverts after 5s. Used by the
+  /// receiver side, which can't tell when "all peripherals settled."
+  private func beginTransferAutoEnd(_ state: TransferState) {
+    transferState = state
+    refreshStatusBarIcon()
+    transferAutoEndTimer?.cancel()
+    let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
+    timer.schedule(deadline: .now() + 5.0)
+    timer.setEventHandler { [weak self] in self?.endTransfer() }
+    timer.resume()
+    transferAutoEndTimer = timer
+  }
+
+  private func endTransfer() {
+    transferAutoEndTimer?.cancel()
+    transferAutoEndTimer = nil
+    transferState = .idle
+    refreshStatusBarIcon()
+  }
+
+  /// Observes `IncomingConnection`'s transfer-direction posts so the
+  /// receiving Mac's status bar reflects what's happening to it.
+  private func setupTransferObservers() {
+    transferReceiveObserver = NotificationCenter.default.addObserver(
+      forName: .iMacSwitchReceivedConnectAll, object: nil, queue: .main
+    ) { [weak self] _ in
+      self?.beginTransferAutoEnd(.receiving)
+    }
+    transferReleaseObserver = NotificationCenter.default.addObserver(
+      forName: .iMacSwitchReceivedUnregisterAll, object: nil, queue: .main
+    ) { [weak self] _ in
+      self?.beginTransferAutoEnd(.sending)
+    }
+    transferIncomingOneObserver = NotificationCenter.default.addObserver(
+      forName: .iMacSwitchPeripheralIncoming, object: nil, queue: .main
+    ) { [weak self] _ in
+      self?.beginTransferAutoEnd(.receiving)
+    }
+    transferOutgoingOneObserver = NotificationCenter.default.addObserver(
+      forName: .iMacSwitchPeripheralOutgoing, object: nil, queue: .main
+    ) { [weak self] _ in
+      self?.beginTransferAutoEnd(.sending)
+    }
+  }
+
+  private func statusBarTooltip() -> String {
+    if !PairingStore.shared.isPaired {
+      return "iMacSwitch: not paired. Open Settings → Pairing."
+    }
+    switch BluetoothManager.shared.state {
+    case .poweredOff:
+      return "iMacSwitch: Bluetooth is off."
+    case .unauthorized:
+      return "iMacSwitch: Bluetooth permission denied."
+    case .unsupported:
+      return "iMacSwitch: Bluetooth not supported on this Mac."
+    case .resetting:
+      return "iMacSwitch: Bluetooth is resetting."
+    case .poweredOn, .unknown:
+      return "iMacSwitch"
+    @unknown default:
+      return "iMacSwitch"
+    }
+  }
+
+  // MARK: - Action Handlers
+
+  /// Runs the switch handoff with `device`. Triggered by clicking a Mac row in
+  /// the menu. `checkHealth` confirms the peer's TCP port is open before we
+  /// touch any local Bluetooth state.
+  private func performSwitch(with device: NetworkDevice) {
+    device.checkHealth { [weak self] result in
+      // `checkHealth` fires on its own queue. Hop to main before any UI or
+      // store mutations, and before calling `checkActualConnectionStatusAsync`
+      // (which expects to be invoked from main).
+      DispatchQueue.main.async {
+        guard let self = self else { return }
+        switch result {
+        case .success:
+          self.bluetoothStore.checkActualConnectionStatusAsync { [weak self] status in
+            self?.handleSwitchAction(status: status, device: device)
+          }
+        case .failure(let error):
+          NotificationManager.showNotification(
+            title: "Error",
+            body: "Failed to communicate with device: \(error)"
+          )
+        case .timeout:
+          NotificationManager.showNotification(
+            title: "Error",
+            body: "No response from device. Please check if the app is running."
+          )
+        }
+      }
+    }
+  }
+
+  private func handleSwitchAction(
+    status: BluetoothPeripheralStore.ConnectionStatus,
+    device: NetworkDevice
+  ) {
+    switch status {
+    case .allConnected:
+      // Show "sending" immediately on the click — feedback before the
+      // secure-channel round trip. Preflight the secure channel BEFORE we
+      // touch local Bluetooth state. `checkHealth` earlier proved the TCP
+      // port is open, but not that the peer's app will accept commands —
+      // if the peer's app isn't actually running or the secure channel
+      // can't be established, we'd otherwise disconnect locally and then
+      // fail to hand peripherals over, leaving them paired nowhere.
+      beginTransfer(.sending)
+      networkStore.executeCommand(.ping, on: device) { [weak self] preflight in
+        guard let self = self else { return }
+        switch preflight {
+        case .failure(let err):
+          self.endTransfer()
+          NotificationManager.showNotification(
+            title: "Switch Cancelled",
+            body:
+              "Couldn't reach the other Mac (\(err.userMessage)) — peripherals stay on this Mac.",
+            identifier: "switch-preflight-failed"
+          )
+        case .success:
+          self.performHandoffToPeer(device: device)
+        }
+      }
+    case .allDisconnected:
+      // Show "receiving" immediately. No preflight needed here:
+      // `executeCommand(.unregisterAll)` *is* the preflight — if it fails,
+      // nothing has changed locally yet.
+      beginTransfer(.receiving)
+      networkStore.executeCommand(.unregisterAll, on: device) { [weak self] result in
+        guard let self = self else { return }
+        switch result {
+        case .success:
+          for peripheral in self.bluetoothStore.peripherals {
+            self.bluetoothStore.connectPeripheralFromPeer(peripheral)
+          }
+          self.endTransfer()
+        case .failure(let err):
+          self.endTransfer()
+          NotificationManager.showNotification(
+            title: "Switch Failed",
+            body: err.userMessage,
+            identifier: "switch-disconnect-remote-failed"
+          )
+        }
+      }
+    case .partial:
+      NotificationManager.showNotification(
+        title: "Peripherals in mixed state",
+        body:
+          "Some peripherals are on this Mac, others aren't. Right-click the menu bar icon to switch each peripheral individually, then left-click to handle them all at once.",
+        identifier: "switch-mixed-state"
+      )
+    }
+  }
+
+  /// Disconnect peripherals locally then hand them to the peer. Called only
+  /// after a successful preflight, but the peer can still die between the
+  /// preflight and `CONNECT_ALL` — if it does, re-connect peripherals
+  /// locally rather than leave them stranded.
+  private func performHandoffToPeer(device: NetworkDevice) {
+    for peripheral in bluetoothStore.peripherals {
+      bluetoothStore.unregisterFromPC(peripheral)
+    }
+    // Show each row "Releasing…" for the rest of the handoff — the mirror of
+    // the peer's "Pairing…". Set after the releases so it isn't clobbered.
+    bluetoothStore.beginFullSetRelease()
+    waitForDisconnection { [weak self] allDisconnected in
+      guard let self = self else { return }
+      guard allDisconnected else {
+        self.bluetoothStore.finishFullSetRelease(success: false)
+        self.endTransfer()
+        NotificationManager.showNotification(
+          title: "Switch Failed",
+          body: "Couldn't disconnect Bluetooth peripherals from this Mac.",
+          identifier: "switch-disconnect-local-failed"
+        )
+        return
+      }
+      self.networkStore.executeCommand(.connectAll, on: device) { [weak self] result in
+        guard let self = self else { return }
+        if case .failure(let err) = result {
+          // Rollback: peer didn't take the peripherals, so re-pair them
+          // locally. Without this the user is left with peripherals paired
+          // nowhere. `connectPeripheral` flips each row to `.connecting`,
+          // which clears the "Releasing…" state on its own.
+          for peripheral in self.bluetoothStore.peripherals {
+            self.bluetoothStore.connectPeripheral(peripheral)
+          }
+          self.endTransfer()
+          NotificationManager.showNotification(
+            title: "Switch Failed",
+            body: "\(err.userMessage) Peripherals reconnected to this Mac.",
+            identifier: "switch-connect-failed"
+          )
+        } else {
+          self.bluetoothStore.finishFullSetRelease(success: true)
+          self.endTransfer()
+        }
+      }
+    }
+  }
+
+  /// Waits for all devices to disconnect with a timeout
+  /// - Parameter completion: Called with true if all devices disconnected, false if timeout occurred
+  private func waitForDisconnection(completion: @escaping (Bool) -> Void) {
+    let deadline = Date().addingTimeInterval(10)
+
+    func check() {
+      bluetoothStore.checkActualConnectionStatusAsync { status in
+        if status == .allDisconnected {
+          completion(true)
+        } else if Date() < deadline {
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            check()
+          }
+        } else {
+          // `status` is the final live IOBluetooth snapshot, not a UI cache.
+          completion(false)
+        }
+      }
+    }
+
+    // First check fires immediately — `unregisterFromPC` issues the
+    // IOBluetooth disconnect synchronously, so the device is often already
+    // disconnected by the time we get here. Falls through to the polled
+    // retry loop if not.
+    check()
+  }
+
+  // MARK: - Settings Management
+
+  /// Opens the newest release in the default browser. Wired to the "Update
+  /// Available" row in the dropdown (see `DropdownContentView`).
+  @objc func openLatestReleasePage(_ sender: Any?) {
+    guard let url = UpdateChecker.shared.releasePageURL else { return }
+    NSWorkspace.shared.open(url)
+  }
+
+  /// Observes `.iMacSwitchReceivedPing` (posted by `IncomingConnection`
+  /// when this Mac handles a `.notification` command) and flashes the
+  /// status-bar icon. This is the fallback signal for the case where
+  /// `UNUserNotificationCenter` silently drops the alert — which it does
+  /// reliably on ad-hoc-signed sandboxed builds where notification
+  /// authorization can't be granted.
+  private func setupPingFlashObserver() {
+    pingObserver = NotificationCenter.default.addObserver(
+      forName: .iMacSwitchReceivedPing,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      self?.flashStatusBarIcon()
+    }
+  }
+
+  /// Briefly swap the status-bar icon to a "bell" symbol, then restore
+  /// the real state via `refreshStatusBarIcon()`. If a subsequent
+  /// state-change (pairing flip, Bluetooth state) triggers a refresh
+  /// during the flash window, the flash gets cut short — that's fine,
+  /// the state change is more important to surface.
+  private func flashStatusBarIcon() {
+    guard let button = statusItem?.button else { return }
+    let flash = NSImage(
+      systemSymbolName: "bell.badge.fill",
+      accessibilityDescription: "Received a ping from the other Mac"
+    )
+    flash?.isTemplate = true
+    button.image = flash
+    pingFlashTimer?.cancel()
+    let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
+    timer.schedule(deadline: .now() + 3.0)
+    timer.setEventHandler { [weak self] in self?.refreshStatusBarIcon() }
+    timer.resume()
+    pingFlashTimer = timer
+  }
+
+  /// Opens the Settings window. We deliberately don't route through the
+  /// SwiftUI `Settings { ... }` scene + `sendAction(showSettingsWindow:)`
+  /// here — that path produces a Dock icon and an active app but no
+  /// visible window on this codebase (LSUIElement + `.accessory` default),
+  /// likely because the scene isn't fully wired up when invoked from a
+  /// status-menu action handler. We host `SettingsView` in a plain
+  /// `NSWindow` instead. Tooltips (`.help(...)`) need the window to be
+  /// properly key under `.regular` to fire — hence the policy bump +
+  /// `makeKeyAndOrderFront(_:)`.
+  @objc func openSettingsWindow(_ sender: Any?) {
+    NSApp.setActivationPolicy(.regular)
+    if settingsWindowController == nil {
+      settingsWindowController = makeSettingsWindowController()
+    }
+    settingsWindowController?.showWindow(nil)
+    settingsWindowController?.window?.makeKeyAndOrderFront(nil)
+    // Activate AFTER ordering the window front so macOS switches to the Space
+    // the window lives on (activating before a window exists can strand the
+    // user on a full-screen Space). Deliberately the deprecated
+    // `ignoringOtherApps:` form — the cooperative `activate()` won't take over
+    // another app's full-screen Space.
+    NSApp.activate(ignoringOtherApps: true)
+  }
+
+  private func makeSettingsWindowController() -> NSWindowController {
+    let window = NSWindow(
+      contentRect: NSRect(origin: .zero, size: NSSize(width: 600, height: 400)),
+      styleMask: [.titled, .closable],
+      backing: .buffered,
+      defer: false
+    )
+    window.center()
+    window.title = "Settings"
+    // Keep the window object around after the user closes it so re-opening
+    // is just `makeKeyAndOrderFront`, not a full reconstruct.
+    window.isReleasedWhenClosed = false
+    window.contentView = NSHostingView(rootView: SettingsView())
+    return NSWindowController(window: window)
+  }
+
+  /// Drops the app back to `.accessory` (no Dock icon) once the last normal
+  /// window closes. SwiftUI's `Settings` scene typically reuses one window,
+  /// but the loop is defensive against any other normal-level window we
+  /// might open in the future.
+  private func setupActivationPolicyTracking() {
+    windowCloseObserver = NotificationCenter.default.addObserver(
+      forName: NSWindow.willCloseNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] notification in
+      // Only react when a normal-level window closes. The right-click
+      // NSMenu fires willClose as soon as the user picks Settings —
+      // reacting to that races against the Settings window actually
+      // appearing (we'd flip back to .accessory before SwiftUI has put
+      // the window on screen, killing the open). Status-item windows
+      // and popovers live at non-`.normal` levels and would hit the
+      // same race.
+      guard let window = notification.object as? NSWindow,
+        window.level == .normal
+      else { return }
+      // `willClose` fires while the closing window is still flagged visible;
+      // defer one runloop tick so the count reflects the post-close state.
+      DispatchQueue.main.async {
+        guard self != nil else { return }
+        let openWindows = NSApp.windows.filter { $0.isVisible && $0.level == .normal }
+        if openWindows.isEmpty {
+          NSApp.setActivationPolicy(.accessory)
+        }
+      }
+    }
+  }
+}

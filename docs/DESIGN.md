@@ -1,10 +1,14 @@
-# 设计原则
+# Design
 
-这份文档用于沉淀产品层面相对稳定的设计原则。
+iMacSwitch is a background utility, not a dashboard. Its UI should remain
+compact, native, and understandable without onboarding screens.
 
-建议放的内容包括：
-
-- 整体视觉原则和交互目标。
-- 字体、颜色、间距和组件系统的选择。
-- 无障碍与响应式设计要求。
-- 什么场景该复用共享组件，什么场景可以例外。
+- Keep the status-bar icon quiet during normal operation and use directional
+  feedback only while a handoff is active.
+- Settings follow the actual setup order: peripherals, peer Mac, pairing,
+  edge trigger, then secondary behavior.
+- The Edge Switch screen exposes only display, edge, dwell time, and selected
+  peripherals. Invalid or temporarily unavailable choices receive inline help.
+- Use standard SwiftUI/AppKit controls and system symbols. Do not add a custom
+  design system or web runtime.
+- Preserve keyboard navigation, VoiceOver labels, and macOS light/dark mode.

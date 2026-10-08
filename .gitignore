@@ -18,6 +18,8 @@ temp/
 .env.*.local
 
 # Dependency caches and common build output
+.build/
+DerivedData/
 node_modules/
 .pnpm-store/
 .npm/
@@ -46,3 +48,10 @@ venv/
 # Misc generated artifacts
 *.swp
 *.swo
+*.xcarchive
+*.app.zip
+*.dmg
+*.p8
+*.p12
+*.keychain
+*.keychain-db

@@ -8,6 +8,8 @@
 - 每份文档写清当前状态和简短摘要。
 - 关联引入它的 execution plan 或 spec。
 
-## 初始文档
+## 当前文档
 
-- `core-beliefs.md`
+- `core-beliefs.md`：产品与协作的稳定约束。
+- `../ARCHITECTURE.md`：运行时组件、协议边界和切换状态机。
+- `../DESIGN.md`：原生菜单栏与设置界面的交互约束。

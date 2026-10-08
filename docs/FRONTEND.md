@@ -1,11 +1,16 @@
-# 前端协作说明
+# macOS UI
 
-当仓库里真正有前端界面时，再把这份文档补完整。
+The interface is native SwiftUI hosted from AppKit because the application is
+an `LSUIElement` menu-bar process.
 
-建议在这里维护：
+- `DropdownContentView` is the status-menu surface and fallback manual control.
+- `SettingsView` owns a fixed-size tabbed settings window created by
+  `AppDelegate`; do not route it back through SwiftUI's otherwise invisible
+  Settings scene without revalidating LSUIElement behavior.
+- Long operations expose explicit connecting/releasing states and disable
+  duplicate actions.
+- Settings must not install global event taps. Edge detection uses global
+  pointer position only and therefore avoids Accessibility permission.
 
-- 本地启动、构建和联调方式。
-- 浏览器驱动的验收流程。
-- 共享组件边界。
-- 设计系统、样式变量和 CSS 规范。
-- 前端测试策略。
+Manual UI verification should cover normal and dark appearance, all Settings
+tabs, missing-peer warnings, and long peripheral names.

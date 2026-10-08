@@ -1,13 +1,31 @@
-# 安全默认约束
+# Security
 
-这份文档用于把安全默认值讲清楚，避免实现逐步演进时越走越散。
+## Peer authentication
 
-建议维护的内容：
+The two Macs derive a 256-bit pre-shared key from a 12-character pairing code
+using PBKDF2-HMAC-SHA256. Every connection establishes a fresh authenticated
+encrypted session with replay protection. Unpaired or mismatched peers cannot
+issue Bluetooth commands.
 
-- 认证与授权约束。
-- 密钥和环境变量管理方式。
-- 依赖治理与供应链安全要求。
-- 数据分级、脱敏与保留策略。
-- 对外 API、Webhook、文件上传和沙箱执行的规则。
+## Local permissions
 
-依赖、SBOM 和 provenance 的后续接入建议，统一写在 `docs/SUPPLY_CHAIN_SECURITY.md`。
+- Bluetooth permission is required to inspect, release, and pair peripherals.
+- Local Network permission is required for Bonjour/AWDL peer discovery.
+- Edge detection only reads `NSEvent.mouseLocation`; it does not install an
+  event tap and does not require Accessibility permission.
+- The application is sandboxed and uses the hardened runtime in Release.
+
+## Secrets
+
+- The peer key is stored in the macOS Keychain, not `UserDefaults`.
+- Apple signing and notarization credentials are GitHub Actions secrets.
+- Never commit `.p8`, `.p12`, passwords, provisioning profiles, temporary
+  keychains, or decoded secret material.
+- CI actions must remain pinned to immutable commit SHAs.
+
+## Network exposure
+
+The listener accepts nearby Bonjour/AWDL or LAN connections, but command
+processing starts only after secure-channel authentication. Authentication
+failures are rate-limited per endpoint; outbound repeated failures are also
+bounded to prevent retry storms.

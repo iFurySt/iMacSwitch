@@ -1,0 +1,177 @@
+name: Signed Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Validate release version
+        id: version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+          echo "value=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Import Developer ID certificate
+        id: signing
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          : "${APPLE_TEAM_ID:?Missing APPLE_TEAM_ID}"
+          : "${MACOS_CERTIFICATE_BASE64:?Missing MACOS_CERTIFICATE_BASE64}"
+          : "${MACOS_CERTIFICATE_PASSWORD:?Missing MACOS_CERTIFICATE_PASSWORD}"
+          keychain_path="${RUNNER_TEMP}/imacswitch-signing.keychain-db"
+          keychain_password="$(openssl rand -base64 32)"
+          certificate_path="${RUNNER_TEMP}/imacswitch-signing.p12"
+          printf '%s' "${MACOS_CERTIFICATE_BASE64}" | /usr/bin/base64 -D > "${certificate_path}"
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          security import "${certificate_path}" \
+            -P "${MACOS_CERTIFICATE_PASSWORD}" \
+            -A -t cert -f pkcs12 \
+            -k "${keychain_path}"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "${keychain_password}" "${keychain_path}"
+          security list-keychains -d user -s "${keychain_path}"
+          identity="$(security find-identity -v -p codesigning "${keychain_path}" \
+            | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' \
+            | head -n 1)"
+          if [[ -z "${identity}" ]]; then
+            echo "Developer ID Application identity not found." >&2
+            exit 1
+          fi
+          if [[ "${identity}" != *"(${APPLE_TEAM_ID})"* ]]; then
+            echo "Developer ID Application identity belongs to another team." >&2
+            exit 1
+          fi
+          echo "identity=${identity}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build Universal app
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          xcodebuild clean build \
+            -project iMacSwitch.xcodeproj \
+            -scheme iMacSwitch \
+            -configuration Release \
+            -derivedDataPath .build/DerivedData \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            MARKETING_VERSION="${VERSION}" \
+            CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}"
+
+      - name: Sign app
+        shell: bash
+        env:
+          SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
+        run: |
+          app_path=".build/DerivedData/Build/Products/Release/iMacSwitch.app"
+          codesign --force --deep --options runtime --timestamp \
+            --entitlements iMacSwitch/iMacSwitch.entitlements \
+            --sign "${SIGNING_IDENTITY}" "${app_path}"
+          codesign --verify --deep --strict --verbose=2 "${app_path}"
+
+      - name: Prepare notarization key
+        shell: bash
+        env:
+          APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
+        run: |
+          : "${APPLE_API_PRIVATE_KEY_BASE64:?Missing APPLE_API_PRIVATE_KEY_BASE64}"
+          printf '%s' "${APPLE_API_PRIVATE_KEY_BASE64}" \
+            | /usr/bin/base64 -D > "${RUNNER_TEMP}/AuthKey.p8"
+          chmod 600 "${RUNNER_TEMP}/AuthKey.p8"
+
+      - name: Notarize and staple app
+        shell: bash
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          : "${APPLE_API_KEY_ID:?Missing APPLE_API_KEY_ID}"
+          : "${APPLE_API_ISSUER_ID:?Missing APPLE_API_ISSUER_ID}"
+          app_path=".build/DerivedData/Build/Products/Release/iMacSwitch.app"
+          ditto -c -k --sequesterRsrc --keepParent "${app_path}" "${RUNNER_TEMP}/notarize.zip"
+          xcrun notarytool submit "${RUNNER_TEMP}/notarize.zip" \
+            --key "${RUNNER_TEMP}/AuthKey.p8" \
+            --key-id "${APPLE_API_KEY_ID}" \
+            --issuer "${APPLE_API_ISSUER_ID}" \
+            --wait
+          xcrun stapler staple "${app_path}"
+          xcrun stapler validate "${app_path}"
+          spctl --assess --type execute --verbose=2 "${app_path}"
+
+      - name: Package app and DMG
+        shell: bash
+        run: |
+          make package \
+            CONFIGURATION=Release \
+            APP_PATH=".build/DerivedData/Build/Products/Release/iMacSwitch.app" \
+            OUTPUT_DIR=dist
+
+      - name: Sign, notarize, and staple DMG
+        shell: bash
+        env:
+          SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          dmg_path="dist/iMacSwitch-${VERSION}.dmg"
+          codesign --force --timestamp --sign "${SIGNING_IDENTITY}" "${dmg_path}"
+          codesign --verify --verbose=2 "${dmg_path}"
+          xcrun notarytool submit "${dmg_path}" \
+            --key "${RUNNER_TEMP}/AuthKey.p8" \
+            --key-id "${APPLE_API_KEY_ID}" \
+            --issuer "${APPLE_API_ISSUER_ID}" \
+            --wait
+          xcrun stapler staple "${dmg_path}"
+          xcrun stapler validate "${dmg_path}"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "${dmg_path}"
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: iMacSwitch-${{ steps.version.outputs.value }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "dist/iMacSwitch-${VERSION}.app.zip" \
+            "dist/iMacSwitch-${VERSION}.dmg" \
+            --verify-tag \
+            --generate-notes \
+            --title "iMacSwitch ${VERSION}"
