@@ -38,3 +38,11 @@
 - `docs/CICD.md`
 - `docs/SECURITY.md`
 - `docs/RELIABILITY.md`
+
+### ✅ Verification
+
+- `make ci` 完成 Universal Release 构建，`xcrun swift-format lint --strict` 与 metadata checks 通过。
+- Hosted CI run `37758721111` 成功生成 unsigned `.app.zip` 和 `.dmg` artifact。
+- Apple Developer 已注册 `iMacSwitch` / `com.ifuryst.imacswitch`，GitHub 已配置 Developer ID 与 App Store Connect notarization secrets。
+- Signed Release run `37776527578` 成功完成 App 和 DMG 的签名、notarization、stapling、Gatekeeper 检查并发布 `v1.0.0`。
+- 从 GitHub Release 重新下载的两个制品均通过本机 `codesign`、`stapler` 和 `spctl`；应用架构为 `arm64 + x86_64`。

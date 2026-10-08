@@ -34,16 +34,20 @@
 - 命令：`make ci`。
 - 手工检查：两台 Mac 配对、AWDL 发现、边缘驻留后选中外设按顺序移交。
 - 观测检查：应用日志包含 AWDL scoped 地址、edge trigger、release/disconnect/connect 结果。
+- Hosted CI：run `37758721111` 完成 Universal 构建及 unsigned `.app.zip` / `.dmg` 上传。
+- Signed release：run `37776527578` 完成 Developer ID 签名、App 与 DMG notarization、stapling、Gatekeeper 检查和 GitHub Release 发布。
+- 下载复验：`v1.0.0` 两个 Release 产物均通过本机 `codesign`、`stapler`、`spctl`，应用为 `arm64 + x86_64`，Bundle ID 为 `com.ifuryst.imacswitch`。
 
 ## 进度记录
 
 - [x] 确认源仓库已验证状态并完成本地提交。
 - [x] 完成精简迁移和品牌隔离。
 - [x] 完成本地构建与产物验证。
-- [ ] 创建 GitHub 仓库并推送。
-- [ ] 配置 Apple 标识、签名 secrets 和发布流水线。
+- [x] 创建 GitHub 仓库并推送。
+- [x] 配置 Apple 标识、签名 secrets 和发布流水线。
 
 ## 决策记录
 
 - 2026-10-08：新仓库保留安全配对和 AWDL 传输，因为它们是跨网络自动切换的必要核心，不继承旧仓库的展示素材与发布历史。
 - 2026-10-08：发布流程采用 tag 驱动，`vX.Y.Z` 标签生成签名并 notarize 的 `.app.zip` 和 `.dmg`，避免引入独立的 Node 发布工具链。
+- 2026-10-08：Apple Identifier 使用 `com.ifuryst.imacswitch`；notarization 使用独立的最小权限 Team API Key，所有私钥只保存在 GitHub Actions Secrets 中。

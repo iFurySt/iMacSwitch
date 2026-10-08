@@ -38,3 +38,13 @@ runner after the job.
 
 The in-app updater reads GitHub's `releases/latest` endpoint, so draft and
 prerelease entries do not notify normal users.
+
+## Verified baseline
+
+- CI run `37758721111` built the initial Universal app and uploaded unsigned
+  `.app.zip` and `.dmg` artifacts.
+- Signed Release run `37776527578` published `v1.0.0` after Developer ID
+  signing, App and DMG notarization, stapling, and Gatekeeper assessment.
+- Both published assets were downloaded again and passed local `codesign`,
+  `stapler`, and `spctl` verification. The app contains `arm64` and `x86_64`
+  slices and uses bundle ID `com.ifuryst.imacswitch`.
