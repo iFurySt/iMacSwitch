@@ -34,6 +34,9 @@ final class ServiceBrowser: NSObject, ServiceBrowsing {
     // `includesPeerToPeer` must be set before the search starts.
     serviceBrowser?.includesPeerToPeer = true
     print("Service browser starting (LAN + peer-to-peer)")
+    DiagnosticLogger.shared.log(
+      category: "network", event: "browser_started",
+      fields: ["peer_to_peer": "true"])
     serviceBrowser?.searchForServices(ofType: serviceType, inDomain: serviceDomain)
   }
 
@@ -58,6 +61,9 @@ extension ServiceBrowser: NetServiceBrowserDelegate {
     _ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool
   ) {
     print("Service discovered: \(service.name)")
+    DiagnosticLogger.shared.log(
+      category: "network", event: "service_discovered",
+      fields: ["peer": DiagnosticLogger.token(service.name)])
     services.append(service)
     service.delegate = self
     service.resolve(withTimeout: timeout)
@@ -67,6 +73,9 @@ extension ServiceBrowser: NetServiceBrowserDelegate {
     _ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool
   ) {
     print("Service removed: \(service.name)")
+    DiagnosticLogger.shared.log(
+      .warning, category: "network", event: "service_removed",
+      fields: ["peer": DiagnosticLogger.token(service.name)])
     services.removeAll { $0 == service }
     DispatchQueue.main.async {
       NetworkDeviceStore.shared.updateDeviceIsActive(id: service.name, isActive: false)
@@ -97,6 +106,7 @@ extension ServiceBrowser: NetServiceDelegate {
     // in the record but unreachable from this Mac.
     let host = hosts.first(where: isPeerToPeerHost(_:)) ?? hosts.first
     guard let host, sender.port != 0 else { return }
+    let path = isPeerToPeerHost(host) ? "peer_to_peer" : "lan"
 
     let device = NetworkDevice(
       id: sender.name,
@@ -111,6 +121,13 @@ extension ServiceBrowser: NetServiceDelegate {
       NetworkDeviceStore.shared.addDiscoveredNetworkDevice(device)
       NetworkDeviceStore.shared.updateNetworkDevice(device)
       print("Device information updated: \(sender.name) at \(host)")
+      DiagnosticLogger.shared.log(
+        category: "network", event: "service_resolved",
+        fields: [
+          "peer": DiagnosticLogger.token(sender.name),
+          "route": path,
+          "host": DiagnosticLogger.token(host),
+        ])
     }
   }
 

@@ -58,16 +58,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   /// only knows "I just got CONNECT_ALL"; it doesn't have a clean "all
   /// peripherals settled" signal, so we revert after a fixed window).
   private var transferAutoEndTimer: DispatchSourceTimer?
+  /// Distributed screen lock/unlock observations are diagnostic-only. They let
+  /// an exported timeline distinguish a plain lock from a real IOKit sleep.
+  private var screenLockObserver: NSObjectProtocol?
+  private var screenUnlockObserver: NSObjectProtocol?
 
   // MARK: - Lifecycle Methods
 
   func applicationDidFinishLaunching(_ notification: Notification) {
+    DiagnosticLogger.shared.logSynchronously(
+      category: "lifecycle", event: "application_launched")
     setupNotifications()
     setupBluetooth()
     setupStatusBar()
     setupActivationPolicyTracking()
     setupPingFlashObserver()
     setupTransferObservers()
+    setupScreenLockDiagnostics()
     edgeSwitchManager.start()
     // Best-effort, silent, throttled to once per 24h. Drives the "Update
     // Available" affordances in the right-click menu and Settings → Other.
@@ -99,8 +106,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   func applicationShouldTerminate(
     _ sender: NSApplication
   ) -> NSApplication.TerminateReply {
-    if quitFromStatusBarMenu { return .terminateNow }
-    if Self.isSystemInitiatedQuit() { return .terminateNow }
+    if quitFromStatusBarMenu {
+      DiagnosticLogger.shared.logSynchronously(
+        category: "lifecycle", event: "application_terminating",
+        fields: ["reason": "status_bar"])
+      return .terminateNow
+    }
+    if Self.isSystemInitiatedQuit() {
+      DiagnosticLogger.shared.logSynchronously(
+        category: "lifecycle", event: "application_terminating",
+        fields: ["reason": "system"])
+      return .terminateNow
+    }
     // Close any visible normal-level windows (the Settings window is the
     // only one this app ever has). The willClose observer in
     // `setupActivationPolicyTracking` will demote the activation policy
@@ -155,12 +172,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     if let token = transferOutgoingOneObserver {
       NotificationCenter.default.removeObserver(token)
     }
+    if let token = screenLockObserver {
+      DistributedNotificationCenter.default().removeObserver(token)
+    }
+    if let token = screenUnlockObserver {
+      DistributedNotificationCenter.default().removeObserver(token)
+    }
   }
 
   // MARK: - Setup Methods
 
   private func setupNotifications() {
     NotificationManager.requestAuthorizationIfNeeded()
+  }
+
+  private func setupScreenLockDiagnostics() {
+    let center = DistributedNotificationCenter.default()
+    screenLockObserver = center.addObserver(
+      forName: Notification.Name("com.apple.screenIsLocked"),
+      object: nil,
+      queue: .main
+    ) { _ in
+      DiagnosticLogger.shared.logSynchronously(
+        category: "lifecycle", event: "screen_locked")
+    }
+    screenUnlockObserver = center.addObserver(
+      forName: Notification.Name("com.apple.screenIsUnlocked"),
+      object: nil,
+      queue: .main
+    ) { _ in
+      DiagnosticLogger.shared.logSynchronously(
+        category: "lifecycle", event: "screen_unlocked")
+    }
   }
 
   private func setupBluetooth() {
@@ -183,6 +226,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Only notify on transitions into a problematic state, not on every
     // delegate fire (which includes the initial .unknown → .poweredOn).
     guard state != lastBluetoothState else { return }
+    DiagnosticLogger.shared.log(
+      state == .poweredOn ? .info : .warning,
+      category: "bluetooth", event: "controller_state_changed",
+      fields: ["state": Self.bluetoothStateName(state)])
     switch state {
     case .poweredOff:
       NotificationManager.showNotification(
@@ -203,6 +250,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       break
     @unknown default:
       break
+    }
+  }
+
+  private static func bluetoothStateName(_ state: CBManagerState) -> String {
+    switch state {
+    case .unknown: return "unknown"
+    case .resetting: return "resetting"
+    case .unsupported: return "unsupported"
+    case .unauthorized: return "unauthorized"
+    case .poweredOff: return "powered_off"
+    case .poweredOn: return "powered_on"
+    @unknown default: return "future"
     }
   }
 
@@ -380,6 +439,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   /// the menu. `checkHealth` confirms the peer's TCP port is open before we
   /// touch any local Bluetooth state.
   private func performSwitch(with device: NetworkDevice) {
+    let operationID = DiagnosticLogger.newOperationID()
+    DiagnosticLogger.shared.log(
+      category: "handoff", event: "full_switch_requested", operationID: operationID,
+      fields: ["peer": DiagnosticLogger.token(device.id)])
     device.checkHealth { [weak self] result in
       // `checkHealth` fires on its own queue. Hop to main before any UI or
       // store mutations, and before calling `checkActualConnectionStatusAsync`
@@ -388,15 +451,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let self = self else { return }
         switch result {
         case .success:
+          DiagnosticLogger.shared.log(
+            category: "handoff", event: "full_switch_health_succeeded",
+            operationID: operationID)
           self.bluetoothStore.checkActualConnectionStatusAsync { [weak self] status in
-            self?.handleSwitchAction(status: status, device: device)
+            self?.handleSwitchAction(status: status, device: device, operationID: operationID)
           }
         case .failure(let error):
+          DiagnosticLogger.shared.log(
+            .error, category: "handoff", event: "full_switch_health_failed",
+            operationID: operationID, fields: ["result": "failure"])
           NotificationManager.showNotification(
             title: "Error",
             body: "Failed to communicate with device: \(error)"
           )
         case .timeout:
+          DiagnosticLogger.shared.log(
+            .error, category: "handoff", event: "full_switch_health_failed",
+            operationID: operationID, fields: ["result": "timeout"])
           NotificationManager.showNotification(
             title: "Error",
             body: "No response from device. Please check if the app is running."
@@ -408,8 +480,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   private func handleSwitchAction(
     status: BluetoothPeripheralStore.ConnectionStatus,
-    device: NetworkDevice
+    device: NetworkDevice,
+    operationID: String
   ) {
+    DiagnosticLogger.shared.log(
+      category: "handoff", event: "full_switch_state_resolved", operationID: operationID,
+      fields: ["state": Self.connectionStatusName(status)])
     switch status {
     case .allConnected:
       // Show "sending" immediately on the click — feedback before the
@@ -424,6 +500,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let self = self else { return }
         switch preflight {
         case .failure(let err):
+          DiagnosticLogger.shared.log(
+            .error, category: "handoff", event: "full_switch_preflight_failed",
+            operationID: operationID, fields: ["failure": err.diagnosticCode])
           self.endTransfer()
           NotificationManager.showNotification(
             title: "Switch Cancelled",
@@ -432,7 +511,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             identifier: "switch-preflight-failed"
           )
         case .success:
-          self.performHandoffToPeer(device: device)
+          DiagnosticLogger.shared.log(
+            category: "handoff", event: "full_switch_preflight_succeeded",
+            operationID: operationID)
+          self.performHandoffToPeer(device: device, operationID: operationID)
         }
       }
     case .allDisconnected:
@@ -444,11 +526,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let self = self else { return }
         switch result {
         case .success:
+          DiagnosticLogger.shared.log(
+            category: "handoff", event: "full_take_peer_release_succeeded",
+            operationID: operationID)
           for peripheral in self.bluetoothStore.peripherals {
             self.bluetoothStore.connectPeripheralFromPeer(peripheral)
           }
           self.endTransfer()
         case .failure(let err):
+          DiagnosticLogger.shared.log(
+            .error, category: "handoff", event: "full_take_peer_release_failed",
+            operationID: operationID, fields: ["failure": err.diagnosticCode])
           self.endTransfer()
           NotificationManager.showNotification(
             title: "Switch Failed",
@@ -471,9 +559,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   /// after a successful preflight, but the peer can still die between the
   /// preflight and `CONNECT_ALL` — if it does, re-connect peripherals
   /// locally rather than leave them stranded.
-  private func performHandoffToPeer(device: NetworkDevice) {
+  private func performHandoffToPeer(device: NetworkDevice, operationID: String) {
     for peripheral in bluetoothStore.peripherals {
-      bluetoothStore.unregisterFromPC(peripheral)
+      bluetoothStore.unregisterFromPC(peripheral, operationID: operationID)
     }
     // Show each row "Releasing…" for the rest of the handoff — the mirror of
     // the peer's "Pairing…". Set after the releases so it isn't clobbered.
@@ -481,7 +569,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     waitForDisconnection { [weak self] allDisconnected in
       guard let self = self else { return }
       guard allDisconnected else {
+        DiagnosticLogger.shared.log(
+          .error, category: "handoff", event: "full_local_disconnect_timeout",
+          operationID: operationID)
         self.bluetoothStore.finishFullSetRelease(success: false)
+        self.bluetoothStore.recoverAfterReleaseTimeout(
+          self.bluetoothStore.peripherals, operationID: operationID)
         self.endTransfer()
         NotificationManager.showNotification(
           title: "Switch Failed",
@@ -490,9 +583,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         return
       }
+      DiagnosticLogger.shared.log(
+        category: "handoff", event: "full_local_disconnect_observed",
+        operationID: operationID)
       self.networkStore.executeCommand(.connectAll, on: device) { [weak self] result in
         guard let self = self else { return }
         if case .failure(let err) = result {
+          DiagnosticLogger.shared.log(
+            .error, category: "handoff", event: "full_peer_connect_failed_rollback",
+            operationID: operationID, fields: ["failure": err.diagnosticCode])
           // Rollback: peer didn't take the peripherals, so re-pair them
           // locally. Without this the user is left with peripherals paired
           // nowhere. `connectPeripheral` flips each row to `.connecting`,
@@ -507,10 +606,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             identifier: "switch-connect-failed"
           )
         } else {
+          DiagnosticLogger.shared.log(
+            category: "handoff", event: "full_peer_connect_succeeded",
+            operationID: operationID)
           self.bluetoothStore.finishFullSetRelease(success: true)
           self.endTransfer()
         }
       }
+    }
+  }
+
+  private static func connectionStatusName(
+    _ status: BluetoothPeripheralStore.ConnectionStatus
+  ) -> String {
+    switch status {
+    case .allConnected: return "all_connected"
+    case .allDisconnected: return "all_disconnected"
+    case .partial: return "partial"
     }
   }
 

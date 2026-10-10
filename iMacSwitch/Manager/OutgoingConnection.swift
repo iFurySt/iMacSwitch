@@ -40,6 +40,21 @@ enum OutgoingFailure: Error {
       return "Too many recent failures reaching the other Mac — backing off. Try again in a minute."
     }
   }
+
+  var diagnosticCode: String {
+    switch self {
+    case .notPaired: return "not_paired"
+    case .connectionFailed: return "connection_failed"
+    case .connectTimeout: return "connect_timeout"
+    case .handshakeFailed(.authFailed): return "handshake_auth_failed"
+    case .handshakeFailed(.handshakeTimeout): return "handshake_timeout"
+    case .handshakeFailed(.replay): return "handshake_replay"
+    case .handshakeFailed(.decryptionFailed): return "handshake_decryption_failed"
+    case .handshakeFailed: return "handshake_failed"
+    case .bodyFailed: return "body_failed"
+    case .tooManyRecentFailures: return "rate_limited"
+    }
+  }
 }
 
 /// Per-host outbound failure tracker. The mirror of `RateLimiter` for the
@@ -126,6 +141,7 @@ final class OutgoingConnection {
   private var finished = false
   private var connectTimer: DispatchSourceTimer?
   private var bodyTimer: DispatchSourceTimer?
+  private let diagnosticID = DiagnosticLogger.newOperationID()
 
   // MARK: - Init
 
@@ -168,9 +184,16 @@ final class OutgoingConnection {
     completion: @escaping (Result<Void, OutgoingFailure>) -> Void
   ) {
     selfRef = self
+    DiagnosticLogger.shared.log(
+      category: "network", event: "outgoing_connection_started",
+      operationID: diagnosticID,
+      fields: ["host": DiagnosticLogger.token(host)])
 
     guard !countsTowardRateLimit || rateLimiter.shouldAttempt(host: host) else {
       print("OutgoingConnection: backing off — too many recent failures to \(host)")
+      DiagnosticLogger.shared.log(
+        .warning, category: "network", event: "outgoing_connection_blocked",
+        operationID: diagnosticID, fields: ["reason": "rate_limited"])
       completion(.failure(.tooManyRecentFailures))
       release()
       return
@@ -178,6 +201,9 @@ final class OutgoingConnection {
 
     guard let psk = pairingStore.currentKey() else {
       print("OutgoingConnection: not paired, aborting send")
+      DiagnosticLogger.shared.log(
+        .error, category: "network", event: "outgoing_connection_blocked",
+        operationID: diagnosticID, fields: ["reason": "not_paired"])
       completion(.failure(.notPaired))
       release()
       return
@@ -201,9 +227,15 @@ final class OutgoingConnection {
       guard let self = self else { return }
       switch state {
       case .ready:
+        DiagnosticLogger.shared.log(
+          category: "network", event: "outgoing_transport_ready",
+          operationID: self.diagnosticID)
         channel.performHandshake { result in
           switch result {
           case .success:
+            DiagnosticLogger.shared.log(
+              category: "network", event: "outgoing_handshake_succeeded",
+              operationID: self.diagnosticID)
             self.connectTimer?.cancel()
             self.connectTimer = nil
             self.startBodyTimer(completion: completion)
@@ -213,11 +245,19 @@ final class OutgoingConnection {
             }
           case .failure(let err):
             print("OutgoingConnection handshake failed: \(err)")
+            DiagnosticLogger.shared.log(
+              .error, category: "network", event: "outgoing_handshake_failed",
+              operationID: self.diagnosticID,
+              fields: ["failure": Self.handshakeFailureCode(err)])
             self.finish(.failure(.handshakeFailed(err)), completion: completion)
           }
         }
       case .failed(let error):
         print("OutgoingConnection failed: \(error)")
+        DiagnosticLogger.shared.log(
+          .error, category: "network", event: "outgoing_transport_failed",
+          operationID: self.diagnosticID,
+          fields: ["error": String(describing: type(of: error))])
         self.finish(
           .failure(.connectionFailed(error.localizedDescription)),
           completion: completion)
@@ -245,6 +285,15 @@ final class OutgoingConnection {
     bodyTimer = nil
     channel?.cancel()
     connection.cancel()
+    let resultCode: String
+    switch result {
+    case .success: resultCode = "success"
+    case .failure(let failure): resultCode = failure.diagnosticCode
+    }
+    DiagnosticLogger.shared.log(
+      resultCode == "success" ? .info : .error,
+      category: "network", event: "outgoing_connection_finished",
+      operationID: diagnosticID, fields: ["result": resultCode])
     // Feed the outbound rate limiter so a series of failures throttles
     // future attempts, and a success clears the counter immediately. Skip
     // `tooManyRecentFailures` — that's the limiter's own refusal and would
@@ -279,6 +328,16 @@ final class OutgoingConnection {
   private func release() {
     queue.async { [weak self] in
       self?.selfRef = nil
+    }
+  }
+
+  private static func handshakeFailureCode(_ error: SecureChannelError) -> String {
+    switch error {
+    case .authFailed: return "auth_failed"
+    case .handshakeTimeout: return "timeout"
+    case .replay: return "replay"
+    case .decryptionFailed: return "decryption_failed"
+    default: return "other"
     }
   }
 }

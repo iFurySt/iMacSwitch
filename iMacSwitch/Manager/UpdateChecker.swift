@@ -5,10 +5,11 @@ import Foundation
 ///
 /// iMacSwitch publishes one GitHub Release per `vX.Y.Z` tag, so
 /// `releases/latest` is the canonical "newest stable
-/// version" — a single unauthenticated request, no pagination. Automatic
-/// checks are silent (a network/parse failure leaves the last known state
-/// untouched); a manual check — the Check-for-Updates button — surfaces its
-/// result. An hourly timer re-evaluates a 24h gate
+/// version" — a single unauthenticated request, no pagination. If the API is
+/// rate-limited, the public release page redirect supplies the same tag.
+/// Automatic checks are silent (a network/parse failure leaves the last known
+/// state untouched); a manual check — the Check-for-Updates button — surfaces
+/// its result. An hourly timer re-evaluates a 24h gate
 /// (both persisted in `UserDefaults`), so the network is hit at most once per
 /// day, while a transient failure — which doesn't advance the gate — is retried
 /// on the next tick instead of waiting for a relaunch. Results drive the
@@ -153,7 +154,9 @@ final class UpdateChecker: ObservableObject {
     request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
     request.setValue(Constants.userAgent, forHTTPHeaderField: "User-Agent")
 
-    URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
+    DiagnosticLogger.shared.log(
+      category: "update", event: "check_started", fields: ["manual": String(manual)])
+    URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
       let version: String? = {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
           let data = data, let tag = Self.parseTagName(from: data)
@@ -161,22 +164,63 @@ final class UpdateChecker: ObservableObject {
         return Self.normalize(tag)
       }()
 
-      DispatchQueue.main.async {
-        guard let self = self else { return }
-        self.isChecking = false
-        guard let version = version else {
-          // Only a manual check surfaces the failure; auto checks stay silent
-          // and just retry on the next hourly tick.
-          if manual { self.lastCheckFailed = true }
-          return
-        }
-        // Only record success: a transient failure shouldn't suppress the
-        // next launch's retry for a full 24h.
-        UserDefaults.standard.set(Date(), forKey: Constants.lastCheckedKey)
-        UserDefaults.standard.set(version, forKey: Constants.latestVersionKey)
-        self.latestVersion = version
+      if let version {
+        self?.finishCheck(version: version, manual: manual, source: "api")
+        return
       }
+      let status = (response as? HTTPURLResponse)?.statusCode
+      DiagnosticLogger.shared.log(
+        .warning, category: "update", event: "api_check_failed",
+        fields: [
+          "http_status": status.map(String.init) ?? "none",
+          "network_error": error == nil ? "false" : "true",
+        ])
+      // Shared public IPs frequently exhaust GitHub's anonymous API quota.
+      // The normal release page is not API-rate-limited and redirects to
+      // `/releases/tag/vX.Y.Z`, which gives us the same stable version signal.
+      self?.checkReleasePage(manual: manual)
     }.resume()
+  }
+
+  private func checkReleasePage(manual: Bool) {
+    guard let url = URL(string: Constants.latestReleasePage) else {
+      finishCheck(version: nil, manual: manual, source: "page")
+      return
+    }
+    var request = URLRequest(url: url)
+    request.httpMethod = "HEAD"
+    request.timeoutInterval = Constants.requestTimeout
+    request.setValue(Constants.userAgent, forHTTPHeaderField: "User-Agent")
+    URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
+      let version: String? = {
+        guard let http = response as? HTTPURLResponse,
+          (200...399).contains(http.statusCode),
+          let finalURL = http.url,
+          finalURL.path.contains("/releases/tag/")
+        else { return nil }
+        return Self.normalize(finalURL.lastPathComponent)
+      }()
+      self?.finishCheck(version: version, manual: manual, source: "page")
+    }.resume()
+  }
+
+  private func finishCheck(version: String?, manual: Bool, source: String) {
+    DispatchQueue.main.async {
+      self.isChecking = false
+      guard let version else {
+        if manual { self.lastCheckFailed = true }
+        DiagnosticLogger.shared.log(
+          .error, category: "update", event: "check_failed", fields: ["source": source])
+        return
+      }
+      UserDefaults.standard.set(Date(), forKey: Constants.lastCheckedKey)
+      UserDefaults.standard.set(version, forKey: Constants.latestVersionKey)
+      self.latestVersion = version
+      self.lastCheckFailed = false
+      DiagnosticLogger.shared.log(
+        category: "update", event: "check_succeeded",
+        fields: ["source": source, "latest_version": version])
+    }
   }
 
   /// Pull `tag_name` out of the `releases/latest` JSON without a model type.

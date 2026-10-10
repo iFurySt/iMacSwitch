@@ -10,6 +10,11 @@
 - If the peer disappears after preflight, the source attempts rollback and
   arms a bounded reconnect watcher.
 - The watcher asks the peer whether it holds a peripheral before reclaiming it.
+- If an asynchronous Bluetooth removal finishes after the 10-second release
+  deadline, the source observes that late disconnect for another 10 seconds
+  and reclaims it instead of leaving it connected to neither Mac.
+- A full-set release timeout recovers every peripheral, including devices that
+  already disconnected while another device was still blocking the batch.
 
 ## Edge trigger guarantees
 
@@ -25,6 +30,18 @@
 - `make ci` performs project checks and an unsigned Universal build.
 - Release CI verifies `codesign`, notarization stapling, and Gatekeeper
   assessment before publishing artifacts.
-- Runtime `print`/`NSLog` output is visible in Console.app by filtering for the
-  `iMacSwitch` process. Useful markers include AWDL scoped addresses, edge
-  trigger, batch handoff progress, and reconnect watcher decisions.
+- Settings → Other → Export Diagnostic Logs saves bounded JSONL containing app
+  lifecycle, update, AWDL/Bonjour, handoff, Bluetooth state, power, and
+  reconnect events. Screen lock/unlock and actual IOKit sleep/wake are separate
+  events. `timestamp_ms`, installation/session IDs, operation IDs,
+  and stable peripheral hashes let exports from both Macs be aligned.
+- Runtime `print`/`NSLog` output remains visible in Console.app for live
+  debugging, but exported diagnostics are the supported incident artifact.
+
+## Incident capture
+
+After a failed switch or wake recovery, export diagnostics on both Macs before
+relaunching the apps if possible. Do not edit or combine the files; their UTC
+timestamps and matching hashed peripheral IDs are intended for correlation.
+The export snapshot records current Bluetooth state, pairing state, active peer
+state, reconnect settings, and each managed peripheral's cached state.

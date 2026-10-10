@@ -12,6 +12,7 @@ struct OtherSettingsView: View {
   private var releaseOnSleep: Bool = true
   @AppStorage(BluetoothPeripheralStore.autoReconnectDefaultsKey)
   private var autoReconnect: Bool = true
+  @State private var diagnosticsStatus: String?
 
   // MARK: - View Content
 
@@ -36,6 +37,19 @@ struct OtherSettingsView: View {
           .help(
             "If a Magic peripheral that should be on this Mac drops — for example after closing the lid, or when you power-cycle a peripheral that got stuck — keep trying to reconnect it until it's back. iMacSwitch won't take a peripheral your other Mac is actively using."
           )
+      }
+      Section {
+        SettingsRowView(
+          title: "Export Diagnostic Logs…",
+          help:
+            "Save recent handoff, Bluetooth, peer discovery, sleep/wake, and recovery events to a local file. Device and network identifiers are hashed; pairing secrets are never included.",
+          action: exportDiagnostics
+        )
+        if let diagnosticsStatus {
+          Text(diagnosticsStatus)
+            .font(.caption)
+            .foregroundColor(diagnosticsStatus == "Export failed" ? .red : .secondary)
+        }
       }
       Section {
         SettingsRowView(
@@ -122,6 +136,20 @@ struct OtherSettingsView: View {
   private func openLatestRelease() {
     guard let url = updateChecker.releasePageURL else { return }
     openURL(url)
+  }
+
+  private func exportDiagnostics() {
+    diagnosticsStatus = nil
+    DiagnosticsExporter.shared.export { result in
+      switch result {
+      case .success:
+        diagnosticsStatus = "Exported"
+      case .failure:
+        diagnosticsStatus = "Export failed"
+      case nil:
+        break
+      }
+    }
   }
 
   /// Refresh launch-at-login state and nudge the update check. `checkIfNeeded`

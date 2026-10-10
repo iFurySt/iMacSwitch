@@ -17,8 +17,11 @@ Wi-Fi must be enabled, but the Macs may be connected to unrelated networks.
 - Waits for the real Bluetooth disconnect before asking the other Mac to pair.
 - Requires the pointer to leave the edge before another switch can fire.
 - Keeps manual per-device and all-device switching as a recovery path.
+- Keeps bounded local diagnostics and exports them on demand from
+  **Settings → Other → Export Diagnostic Logs…**.
 - Checks [this repository's Releases](https://github.com/iFurySt/iMacSwitch/releases)
   once a day and only notifies; it never installs an update automatically.
+  This is a lightweight built-in checker, not Sparkle.
 
 ## Install
 
@@ -39,6 +42,11 @@ On both Macs:
 For two-way switching, configure the corresponding physical outer edge on each
 Mac. An edge shared by two displays on the same Mac normally cannot be used for
 dwell switching because the pointer immediately crosses onto the other display.
+
+If a peripheral is ever left on neither Mac, export diagnostics from both Macs
+as soon as practical. The files contain timestamped handoff, Bluetooth,
+peer-discovery, sleep/wake, and recovery events. Raw Bluetooth/network
+identifiers and pairing secrets are not included.
 
 ## Build locally
 

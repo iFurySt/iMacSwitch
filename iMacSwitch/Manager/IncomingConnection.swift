@@ -61,6 +61,7 @@ final class IncomingConnection {
   private var selfRef: IncomingConnection?
   private var authenticated = false
   private var finished = false
+  private let diagnosticID = DiagnosticLogger.newOperationID()
 
   // MARK: - Init
 
@@ -82,9 +83,18 @@ final class IncomingConnection {
 
   func start() {
     selfRef = self
+    DiagnosticLogger.shared.log(
+      category: "network", event: "incoming_connection_started",
+      operationID: diagnosticID,
+      fields: [
+        "endpoint": DiagnosticLogger.token(String(describing: endpoint))
+      ])
 
     guard rateLimiter.shouldAccept(endpoint: endpoint) else {
       print("Rejecting connection from blocked endpoint")
+      DiagnosticLogger.shared.log(
+        .warning, category: "network", event: "incoming_connection_rejected",
+        operationID: diagnosticID, fields: ["reason": "rate_limited"])
       connection.cancel()
       release()
       return
@@ -92,6 +102,9 @@ final class IncomingConnection {
 
     guard let psk = pairingStore.currentKey() else {
       print("Rejecting connection: not paired")
+      DiagnosticLogger.shared.log(
+        .warning, category: "network", event: "incoming_connection_rejected",
+        operationID: diagnosticID, fields: ["reason": "not_paired"])
       connection.cancel()
       release()
       return
@@ -121,10 +134,17 @@ final class IncomingConnection {
       switch result {
       case .success:
         self.authenticated = true
+        DiagnosticLogger.shared.log(
+          category: "network", event: "incoming_handshake_succeeded",
+          operationID: self.diagnosticID)
         self.resetIdleTimer()
         self.readNext()
       case .failure(let error):
         print("Handshake failed: \(error)")
+        DiagnosticLogger.shared.log(
+          .error, category: "network", event: "incoming_handshake_failed",
+          operationID: self.diagnosticID,
+          fields: ["failure": Self.handshakeFailureCode(error)])
         // Only AEAD/auth failures indicate a credential-probe attempt.
         // Framing, timeout, and network errors are flaky-network noise; if we
         // count them we lock out the legitimate peer.
@@ -182,6 +202,9 @@ final class IncomingConnection {
   }
 
   private func handleCommand(_ command: DeviceCommand) {
+    DiagnosticLogger.shared.log(
+      category: "network", event: "incoming_command_received",
+      operationID: diagnosticID, fields: ["command": command.rawValue])
     lastReceivedCommand = command
     switch command {
     case .notification, .syncPeripherals, .unregisterOne, .connectOne, .holdsOne:
@@ -208,6 +231,11 @@ final class IncomingConnection {
               allSucceeded = allSucceeded && success
               remaining -= 1
               if remaining == 0 {
+                DiagnosticLogger.shared.log(
+                  allSucceeded ? .info : .error,
+                  category: "handoff", event: "incoming_connect_all_finished",
+                  operationID: self.diagnosticID,
+                  fields: ["success": String(allSucceeded)])
                 self.sendString(
                   (allSucceeded ? DeviceCommand.operationSuccess : DeviceCommand.operationFailed)
                     .rawValue
@@ -227,6 +255,9 @@ final class IncomingConnection {
       }
       // See connectAll above for the best-effort-ack rationale.
       sendString(DeviceCommand.operationSuccess.rawValue)
+      DiagnosticLogger.shared.log(
+        category: "handoff", event: "incoming_unregister_all_acknowledged",
+        operationID: diagnosticID)
       lastReceivedCommand = nil
     case .ping:
       // Pure no-op preflight; just acknowledge.
@@ -286,6 +317,10 @@ final class IncomingConnection {
       }
       let store = bluetoothStore
       let address = message
+      DiagnosticLogger.shared.log(
+        category: "handoff", event: "incoming_unregister_one",
+        operationID: diagnosticID,
+        fields: ["peripheral": DiagnosticLogger.token(address)])
       DispatchQueue.main.async {
         // Peripheral is leaving this Mac for the peer — flash the sending arrow.
         NotificationCenter.default.post(name: .iMacSwitchPeripheralOutgoing, object: nil)
@@ -305,6 +340,10 @@ final class IncomingConnection {
       }
       let store = bluetoothStore
       let address = message
+      DiagnosticLogger.shared.log(
+        category: "handoff", event: "incoming_connect_one",
+        operationID: diagnosticID,
+        fields: ["peripheral": DiagnosticLogger.token(address)])
       DispatchQueue.main.async { [weak self] in
         guard let self = self else { return }
         // Peripheral is arriving at this Mac — flash the receiving arrow.
@@ -317,6 +356,14 @@ final class IncomingConnection {
         }
         store.connectPeripheralFromPeer(peripheral) { success in
           self.queue.async {
+            DiagnosticLogger.shared.log(
+              success ? .info : .error,
+              category: "handoff", event: "incoming_connect_one_finished",
+              operationID: self.diagnosticID,
+              fields: [
+                "peripheral": DiagnosticLogger.token(address),
+                "success": String(success),
+              ])
             self.sendString(
               (success ? DeviceCommand.operationSuccess : DeviceCommand.operationFailed).rawValue)
           }
@@ -336,6 +383,13 @@ final class IncomingConnection {
       bluetoothStore.isHoldingPeripheral(address: message) { [weak self] held in
         guard let self = self else { return }
         self.queue.async {
+          DiagnosticLogger.shared.log(
+            category: "reconnect", event: "incoming_holds_one_answered",
+            operationID: self.diagnosticID,
+            fields: [
+              "peripheral": DiagnosticLogger.token(message),
+              "held": String(held),
+            ])
           self.sendString(
             (held ? DeviceCommand.operationSuccess : DeviceCommand.operationFailed).rawValue)
         }
@@ -409,6 +463,16 @@ final class IncomingConnection {
   private func release() {
     queue.async { [weak self] in
       self?.selfRef = nil
+    }
+  }
+
+  private static func handshakeFailureCode(_ error: SecureChannelError) -> String {
+    switch error {
+    case .authFailed: return "auth_failed"
+    case .handshakeTimeout: return "timeout"
+    case .replay: return "replay"
+    case .decryptionFailed: return "decryption_failed"
+    default: return "other"
     }
   }
 }

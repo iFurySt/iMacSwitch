@@ -13,6 +13,8 @@ issue Bluetooth commands.
 - Local Network permission is required for Bonjour/AWDL peer discovery.
 - Edge detection only reads `NSEvent.mouseLocation`; it does not install an
   event tap and does not require Accessibility permission.
+- User Selected File read/write is used only for the explicit diagnostic
+  export destination chosen in the macOS save panel.
 - The application is sandboxed and uses the hardened runtime in Release.
 
 ## Secrets
@@ -29,3 +31,14 @@ The listener accepts nearby Bonjour/AWDL or LAN connections, but command
 processing starts only after secure-channel authentication. Authentication
 failures are rate-limited per endpoint; outbound repeated failures are also
 bounded to prevent retry storms.
+
+## Diagnostic data
+
+- Diagnostics stay local until the user explicitly chooses an export path.
+- Rolling files are bounded (one current file plus four rotations) and contain
+  structured state transitions rather than protocol payloads.
+- Raw Bluetooth MAC addresses, peer names, IP/AWDL addresses, pairing codes,
+  PSKs, Keychain data, and signing credentials are not written. Identifiers
+  needed to align two Macs are represented by stable truncated SHA-256 hashes.
+- Export includes app/build version, OS version, architecture, random
+  installation/session IDs, timestamps, settings, and operational outcomes.

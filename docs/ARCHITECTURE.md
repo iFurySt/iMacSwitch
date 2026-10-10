@@ -20,7 +20,10 @@ third-party runtime dependencies. It runs the same binary on both Macs.
 - `Manager/PairingStore.swift`: pairing-code derivation and Keychain storage.
 - `View/`: compact setup, status, fallback controls, and edge-switch settings.
 - `Manager/UpdateChecker.swift`: anonymous daily check of the public GitHub
-  Releases API for `iFurySt/iMacSwitch`.
+  Releases API for `iFurySt/iMacSwitch`, with a release-page redirect fallback
+  when a shared public IP has exhausted GitHub's anonymous API quota.
+- `Manager/DiagnosticLogger.swift`: privacy-conscious bounded JSONL event log
+  and user-initiated export from Settings → Other.
 
 ## Handoff sequence
 
@@ -32,6 +35,11 @@ third-party runtime dependencies. It runs the same binary on both Macs.
    disconnect wait (up to 10 seconds), then peer `CONNECT_ONE`.
 5. A failure stops the batch. Untouched peripherals remain local; a released
    device uses the existing reconnect watcher and peer ownership probe.
+
+If the local disconnect has not settled at the 10-second deadline, the source
+clears the intentional-release suppression and watches for another 10 seconds.
+A device that disconnects late is reclaimed locally. The full-set path applies
+the same recovery to every device, including a partially disconnected batch.
 
 Serial handoff is intentional: overlapping `IOBluetoothDevicePair` operations
 on the receiving Mac are less reliable than one-at-a-time pairing.
@@ -51,3 +59,6 @@ No cloud relay is required.
   `com.ifuryst.imacswitch.psk-v1`.
 - A display is persisted by CoreGraphics UUID rather than transient screen
   index, so reconnecting an external display preserves its configuration.
+- Diagnostic events live under the sandboxed Application Support directory.
+  The current file and four rotations are capped at roughly 1.5 MB each.
+  Export concatenates them oldest-first into one JSONL file.

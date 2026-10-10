@@ -105,6 +105,9 @@ final class NetworkDeviceStore: ObservableObject, NetworkDeviceManageable {
     // "Available Devices" until the next Bonjour resolution.
     networkDevices.append(device)
     saveNetworkDevices()
+    DiagnosticLogger.shared.log(
+      category: "network", event: "peer_registered",
+      fields: ["peer": DiagnosticLogger.token(device.id)])
   }
 
   func removeNetworkDevice(device: NetworkDevice) {
@@ -187,6 +190,13 @@ final class NetworkDeviceStore: ObservableObject, NetworkDeviceManageable {
     // Mirror Bonjour's verdict into reachability (a withdraw is a valid, if
     // slow, offline signal); the `.ping` poll provides the fast path.
     deviceReachability[id] = isActive
+    DiagnosticLogger.shared.log(
+      isActive ? .info : .warning,
+      category: "network", event: "peer_activity_changed",
+      fields: [
+        "peer": DiagnosticLogger.token(id),
+        "active": String(isActive),
+      ])
   }
 
   // MARK: - Reachability
@@ -242,6 +252,13 @@ final class NetworkDeviceStore: ObservableObject, NetworkDeviceManageable {
           // objectWillChange every interval and needlessly re-render observers.
           if self.deviceReachability[device.id] != reachable {
             self.deviceReachability[device.id] = reachable
+            DiagnosticLogger.shared.log(
+              reachable ? .info : .warning,
+              category: "network", event: "peer_reachability_changed",
+              fields: [
+                "peer": DiagnosticLogger.token(device.id),
+                "reachable": String(reachable),
+              ])
           }
         }
       }
@@ -366,7 +383,17 @@ extension NetworkDeviceStore {
     countsTowardRateLimit: Bool = true,
     completion: @escaping (Result<Void, OutgoingFailure>) -> Void
   ) {
+    let operationID = DiagnosticLogger.newOperationID()
+    DiagnosticLogger.shared.log(
+      category: "network", event: "command_started", operationID: operationID,
+      fields: [
+        "command": command.rawValue,
+        "peer": DiagnosticLogger.token(device.id),
+      ])
     guard PairingStore.shared.isPaired else {
+      DiagnosticLogger.shared.log(
+        .error, category: "network", event: "command_finished", operationID: operationID,
+        fields: ["command": command.rawValue, "result": "not_paired"])
       completion(.failure(.notPaired))
       return
     }
@@ -402,7 +429,18 @@ extension NetworkDeviceStore {
           }
         }
       },
-      completion: completion
+      completion: { result in
+        let resultCode: String
+        switch result {
+        case .success: resultCode = "success"
+        case .failure(let failure): resultCode = failure.diagnosticCode
+        }
+        DiagnosticLogger.shared.log(
+          result.isSuccess ? .info : .error,
+          category: "network", event: "command_finished", operationID: operationID,
+          fields: ["command": command.rawValue, "result": resultCode])
+        completion(result)
+      }
     )
   }
 
@@ -572,6 +610,15 @@ extension NetworkDeviceStore {
     countsTowardRateLimit: Bool = true,
     completion: @escaping (Result<Void, OutgoingFailure>) -> Void
   ) {
+    let operationID = DiagnosticLogger.newOperationID()
+    DiagnosticLogger.shared.log(
+      category: "network", event: "peripheral_command_started",
+      operationID: operationID,
+      fields: [
+        "command": command.rawValue,
+        "peer": DiagnosticLogger.token(device.id),
+        "peripheral": DiagnosticLogger.token(payload),
+      ])
     guard PairingStore.shared.isPaired else {
       completion(.failure(.notPaired))
       return
@@ -608,7 +655,30 @@ extension NetworkDeviceStore {
           }
         }
       },
-      completion: completion
+      completion: { result in
+        let resultCode: String
+        switch result {
+        case .success: resultCode = "success"
+        case .failure(let failure): resultCode = failure.diagnosticCode
+        }
+        DiagnosticLogger.shared.log(
+          result.isSuccess ? .info : .error,
+          category: "network", event: "peripheral_command_finished",
+          operationID: operationID,
+          fields: [
+            "command": command.rawValue,
+            "peripheral": DiagnosticLogger.token(payload),
+            "result": resultCode,
+          ])
+        completion(result)
+      }
     )
+  }
+}
+
+extension Result where Success == Void, Failure == OutgoingFailure {
+  fileprivate var isSuccess: Bool {
+    if case .success = self { return true }
+    return false
   }
 }

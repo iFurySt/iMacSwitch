@@ -41,12 +41,15 @@ final class SleepMonitor {
     rootPort = IORegisterForSystemPower(refCon, &notifyPortRef, Self.callback, &notifierObject)
     guard rootPort != 0, let notifyPortRef = notifyPortRef else {
       print("SleepMonitor: IORegisterForSystemPower failed")
+      DiagnosticLogger.shared.log(
+        .error, category: "power", event: "monitor_registration_failed")
       return
     }
     CFRunLoopAddSource(
       CFRunLoopGetMain(),
       IONotificationPortGetRunLoopSource(notifyPortRef).takeUnretainedValue(),
       .commonModes)
+    DiagnosticLogger.shared.log(category: "power", event: "monitor_registered")
   }
 
   deinit {
@@ -78,13 +81,20 @@ final class SleepMonitor {
     case kIOMessageSystemWillSleep:
       // Do our teardown, *then* allow the transition. Holding the ack until
       // the handler returns is what keeps the release from racing the radio.
+      DiagnosticLogger.shared.logSynchronously(
+        category: "power", event: "system_will_sleep")
       onWillSleep?()
+      DiagnosticLogger.shared.logSynchronously(
+        category: "power", event: "system_sleep_acknowledged")
       IOAllowPowerChange(rootPort, Int(bitPattern: argument))
     case kIOMessageCanSystemSleep:
       // Idle-sleep query — never veto; we only care about the actual sleep.
+      DiagnosticLogger.shared.log(
+        .debug, category: "power", event: "system_can_sleep_query")
       IOAllowPowerChange(rootPort, Int(bitPattern: argument))
     case kIOMessageSystemHasPoweredOn:
       // Informational — no acknowledgement required.
+      DiagnosticLogger.shared.log(category: "power", event: "system_did_wake")
       onDidWake?()
     default:
       break

@@ -160,6 +160,13 @@ final class EdgeSwitchManager {
     print(
       "Edge switch triggered at \(screen.localizedName) \(edge.rawValue) edge for \(selected.count) peripheral(s)"
     )
+    DiagnosticLogger.shared.log(
+      category: "edge", event: "triggered",
+      fields: [
+        "display": DiagnosticLogger.token(screen.localizedName),
+        "edge": edge.rawValue,
+        "peripherals": selected.map { DiagnosticLogger.token($0.id) }.joined(separator: ","),
+      ])
     store.sendPeripheralsToPeer(selected)
   }
 

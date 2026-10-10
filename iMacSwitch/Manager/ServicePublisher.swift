@@ -81,11 +81,19 @@ final class ServicePublisher: NSObject, NetworkNetworkServicePublishable {
       if let port = listener?.port?.rawValue {
         print("Listener ready: Port \(port)")
         publishService(port: Int(port))
+        DiagnosticLogger.shared.log(
+          category: "network", event: "listener_ready",
+          fields: ["peer_to_peer": "true"])
       }
     case .failed(let error):
       print("Listener error: \(error)")
+      DiagnosticLogger.shared.log(
+        .error, category: "network", event: "listener_failed",
+        fields: ["error": String(describing: type(of: error))])
     case .cancelled:
       print("Listener was cancelled")
+      DiagnosticLogger.shared.log(
+        .warning, category: "network", event: "listener_cancelled")
     default:
       break
     }
@@ -155,9 +163,15 @@ final class ServicePublisher: NSObject, NetworkNetworkServicePublishable {
 extension ServicePublisher: NetServiceDelegate {
   func netServiceDidPublish(_ sender: NetService) {
     print("Service published successfully: \(sender.name)")
+    DiagnosticLogger.shared.log(
+      category: "network", event: "service_published",
+      fields: ["self": DiagnosticLogger.token(sender.name)])
   }
 
   func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {
     print("Failed to publish service: \(errorDict)")
+    DiagnosticLogger.shared.log(
+      .error, category: "network", event: "service_publish_failed",
+      fields: ["self": DiagnosticLogger.token(sender.name)])
   }
 }
