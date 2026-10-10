@@ -37,3 +37,12 @@
 - `iMacSwitch/View/Settings/OtherSettingsView.swift`
 - `docs/RELIABILITY.md`
 - `docs/SECURITY.md`
+
+### ✅ Verification
+
+- `xcrun swift-format lint --recursive iMacSwitch`
+- `make ci`（本机 arm64 + x86_64 Universal Release 构建）
+- GitHub CI run `38035465717`
+- Signed Release run `38035543621`
+- 重新下载 v1.0.1 `.app.zip` 和 `.dmg`，验证 Developer ID 签名、notarization ticket、staple 和 Gatekeeper 均通过
+- GitHub API 与 `/releases/latest` 页面均解析到 `v1.0.1`
